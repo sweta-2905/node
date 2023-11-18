@@ -1,6 +1,8 @@
 # Copyright (C) The c-ares project and its contributors
 # SPDX-License-Identifier: MIT
-CMAKE_MINIMUM_REQUIRED (VERSION 3.1.0)
+CMAKE_MINIMUM_REQUIRED (VERSION 3.5.0)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 
 INCLUDE (CheckIncludeFiles)
 INCLUDE (CheckTypeSize)
@@ -10,10 +12,12 @@ INCLUDE (CheckCSourceCompiles)
 INCLUDE (CheckStructHasMember)
 INCLUDE (CheckLibraryExists)
 
-PROJECT (c-ares LANGUAGES C VERSION "1.20.1" )
+PROJECT (c-ares LANGUAGES C VERSION "1.22.0" )
+
+INCLUDE (EnableWarnings)
 
 # Set this version before release
-SET (CARES_VERSION "1.20.1")
+SET (CARES_VERSION "1.22.0")
 
 INCLUDE (GNUInstallDirs) # include this *AFTER* PROJECT(), otherwise paths are wrong.
 
@@ -28,7 +32,7 @@ INCLUDE (GNUInstallDirs) # include this *AFTER* PROJECT(), otherwise paths are w
 # For example, a version of 4:0:2 would generate output such as:
 #    libname.so   -> libname.so.2
 #    libname.so.2 -> libname.so.2.2.0
-SET (CARES_LIB_VERSIONINFO "9:1:7")
+SET (CARES_LIB_VERSIONINFO "10:0:8")
 
 
 OPTION (CARES_STATIC     "Build as a static library"                                             OFF)
@@ -38,6 +42,7 @@ OPTION (CARES_STATIC_PIC "Build the static library as PIC (position independent)
 OPTION (CARES_BUILD_TESTS "Build and run tests"                                                  OFF)
 OPTION (CARES_BUILD_CONTAINER_TESTS "Build and run container tests (implies CARES_BUILD_TESTS, Linux only)" OFF)
 OPTION (CARES_BUILD_TOOLS "Build tools"                                                          ON)
+OPTION (CARES_SYMBOL_HIDING "Hide private symbols in shared libraries"                           OFF)
 SET    (CARES_RANDOM_FILE "/dev/urandom" CACHE STRING "Suitable File / Device Path for entropy, such as /dev/urandom")
 
 
@@ -67,6 +72,21 @@ IF (MSVC)
 		SET (upper_config_type)
 		SET (config_type)
 		SET (flag_var)
+	ENDIF ()
+ENDIF ()
+
+IF (CARES_SYMBOL_HIDING)
+	IF (CMAKE_VERSION VERSION_LESS 3.12)
+		MESSAGE (FATAL_ERROR "Hiding symbols requires CMake 3.12")
+	ENDIF ()
+	CMAKE_POLICY (SET CMP0063 NEW)
+	SET (CARES_SYMBOL_SCOPE_EXTERN [=[__attribute__ ((visibility("default")))]=])
+	CHECK_C_SOURCE_COMPILES ("
+		${CARES_SYMBOL_SCOPE_EXTERN} int somefunc() { return 0; }
+		int main() { return somefunc(); }
+	" HAVE_VISIBILITY_ATTRIBUTE)
+	IF (NOT HAVE_VISIBILITY_ATTRIBUTE)
+		MESSAGE (FATAL_ERROR "C compiler does not accept visibility attribute")
 	ENDIF ()
 ENDIF ()
 
@@ -199,6 +219,7 @@ CHECK_INCLUDE_FILES (sys/uio.h             HAVE_SYS_UIO_H)
 CHECK_INCLUDE_FILES (time.h                HAVE_TIME_H)
 CHECK_INCLUDE_FILES (dlfcn.h               HAVE_DLFCN_H)
 CHECK_INCLUDE_FILES (unistd.h              HAVE_UNISTD_H)
+CHECK_INCLUDE_FILES (iphlpapi.h            HAVE_IPHLPAPI_H)
 
 # On OpenBSD, you must include sys/types.h before netinet/tcp.h
 IF (HAVE_SYS_TYPES_H)
@@ -229,7 +250,7 @@ ELSEIF (CMAKE_SYSTEM_NAME STREQUAL "AIX")
 ELSEIF (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
 	# Don't define _XOPEN_SOURCE on FreeBSD, it actually reduces visibility instead of increasing it
 ELSEIF (WIN32)
-	LIST (APPEND SYSFLAGS -DWIN32_LEAN_AND_MEAN -D_CRT_SECURE_NO_DEPRECATE -D_CRT_NONSTDC_NO_DEPRECATE -D_WIN32_WINNT=0x0600)
+	LIST (APPEND SYSFLAGS -DWIN32_LEAN_AND_MEAN -D_CRT_SECURE_NO_DEPRECATE -D_CRT_NONSTDC_NO_DEPRECATE -D_WIN32_WINNT=0x0602)
 ENDIF ()
 ADD_DEFINITIONS(${SYSFLAGS})
 
@@ -289,12 +310,14 @@ CARES_EXTRAINCLUDE_IFSET (HAVE_SYS_SELECT_H   sys/select.h)
 CARES_EXTRAINCLUDE_IFSET (HAVE_SYS_SOCKET_H   sys/socket.h)
 CARES_EXTRAINCLUDE_IFSET (HAVE_SYS_SOCKIO_H	sys/sockio.h)
 CARES_EXTRAINCLUDE_IFSET (HAVE_SYS_TIME_H     sys/time.h)
+CARES_EXTRAINCLUDE_IFSET (HAVE_SYS_STAT_H     sys/stat.h)
 CARES_EXTRAINCLUDE_IFSET (HAVE_SYS_UIO_H      sys/uio.h)
 CARES_EXTRAINCLUDE_IFSET (HAVE_TIME_H         time.h)
 CARES_EXTRAINCLUDE_IFSET (HAVE_FCNTL_H        fcntl.h)
 CARES_EXTRAINCLUDE_IFSET (HAVE_UNISTD_H       unistd.h)
 CARES_EXTRAINCLUDE_IFSET (HAVE_WINSOCK2_H     winsock2.h)
 CARES_EXTRAINCLUDE_IFSET (HAVE_WS2TCPIP_H     ws2tcpip.h)
+CARES_EXTRAINCLUDE_IFSET (HAVE_IPHLPAPI_H     iphlpapi.h)
 CARES_EXTRAINCLUDE_IFSET (HAVE_WINDOWS_H      windows.h)
 
 # Check Types
@@ -399,7 +422,7 @@ CHECK_SYMBOL_EXISTS (strncmpi        "${CMAKE_EXTRA_INCLUDE_FILES}" HAVE_STRNCMP
 CHECK_SYMBOL_EXISTS (strnicmp        "${CMAKE_EXTRA_INCLUDE_FILES}" HAVE_STRNICMP)
 CHECK_SYMBOL_EXISTS (writev          "${CMAKE_EXTRA_INCLUDE_FILES}" HAVE_WRITEV)
 CHECK_SYMBOL_EXISTS (arc4random_buf  "${CMAKE_EXTRA_INCLUDE_FILES}" HAVE_ARC4RANDOM_BUF)
-
+CHECK_SYMBOL_EXISTS (stat            "${CMAKE_EXTRA_INCLUDE_FILES}" HAVE_STAT)
 
 # On Android, the system headers may define __system_property_get(), but excluded
 # from libc.  We need to perform a link test instead of a header/symbol test.

@@ -175,6 +175,9 @@
 /* Define to 1 if you have a working ioctl SIOCGIFADDR function. */
 #undef HAVE_IOCTL_SIOCGIFADDR
 
+/* Define to 1 if you have the <iphlpapi.h> header file. */
+#undef HAVE_IPHLPAPI_H
+
 /* Define to 1 if you have the `resolve' library (-lresolve). */
 #undef HAVE_LIBRESOLVE
 
@@ -243,6 +246,9 @@
 
 /* Define to 1 if you have the <socket.h> header file. */
 #undef HAVE_SOCKET_H
+
+/* Define to 1 if you have the stat function. */
+#undef HAVE_STAT
 
 /* Define to 1 if you have the <stdbool.h> header file. */
 #undef HAVE_STDBOOL_H
