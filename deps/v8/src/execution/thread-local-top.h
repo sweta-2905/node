@@ -99,12 +99,12 @@ class ThreadLocalTop {
   // object in the getter. Same for {pending_handler_context_} below. In the
   // meantime, assert that the memory layout is the same.
   static_assert(sizeof(Context) == kSystemPointerSize);
-  Context context_;
+  Tagged<Context> context_;
   std::atomic<ThreadId> thread_id_;
-  Object pending_exception_;
+  Tagged<Object> pending_exception_ = Smi::zero();
 
   // Communication channel between Isolate::FindHandler and the CEntry.
-  Context pending_handler_context_;
+  Tagged<Context> pending_handler_context_;
   Address pending_handler_entrypoint_;
   Address pending_handler_constant_pool_;
   Address pending_handler_fp_;
@@ -114,14 +114,14 @@ class ThreadLocalTop {
   Address last_api_entry_;
 
   // Communication channel between Isolate::Throw and message consumers.
-  Object pending_message_;
+  Tagged<Object> pending_message_ = Smi::zero();
   bool rethrowing_message_;
 
   // Use a separate value for scheduled exceptions to preserve the
   // invariants that hold about pending_exception.  We may want to
   // unify them later.
   bool external_caught_exception_;
-  Object scheduled_exception_;
+  Tagged<Object> scheduled_exception_ = Smi::zero();
 
   // Stack.
   // The frame pointer of the top c entry frame.
@@ -149,7 +149,7 @@ class ThreadLocalTop {
 
   // Wasm Stack Switching: The central stack.
   // If set, then we are currently executing code on the central stack.
-  bool is_on_central_stack_flag_;
+  uint8_t is_on_central_stack_flag_;
   // On switching from the central stack these fields are set
   // to the central stack's SP and stack limit accordingly,
   // to use for switching from secondary stacks.

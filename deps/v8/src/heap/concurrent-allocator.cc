@@ -88,6 +88,17 @@ ConcurrentAllocator::ConcurrentAllocator(LocalHeap* local_heap,
   DCHECK_IMPLIES(!local_heap_, context_ == Context::kGC);
 }
 
+#if DEBUG
+void ConcurrentAllocator::Verify() const {
+  lab_.Verify();
+
+  if (lab_.top()) {
+    Page* page = Page::FromAllocationAreaAddress(lab_.top());
+    DCHECK_EQ(page->owner(), space_);
+  }
+}
+#endif  // DEBUG
+
 void ConcurrentAllocator::FreeLinearAllocationArea() {
   if (IsLabValid() && lab_.top() != lab_.limit()) {
     base::Optional<CodePageHeaderModificationScope> optional_scope;
@@ -159,10 +170,14 @@ AllocationResult ConcurrentAllocator::AllocateInLabSlow(
 }
 
 bool ConcurrentAllocator::AllocateLab(AllocationOrigin origin) {
+  if (local_heap_) {
+    owning_heap()->StartIncrementalMarkingIfAllocationLimitIsReached(
+        local_heap_, owning_heap()->GCFlagsForIncrementalMarking(),
+        kGCCallbackScheduleIdleGarbageCollection);
+  }
+
   auto result = AllocateFromSpaceFreeList(kMinLabSize, kMaxLabSize, origin);
   if (!result) return false;
-
-  owning_heap()->StartIncrementalMarkingIfAllocationLimitIsReachedBackground();
 
   FreeLinearAllocationArea();
 
@@ -186,14 +201,14 @@ ConcurrentAllocator::AllocateFromSpaceFreeList(size_t min_size_in_bytes,
                                                AllocationOrigin origin) {
   DCHECK(!space_->is_compaction_space());
   DCHECK(space_->identity() == OLD_SPACE || space_->identity() == CODE_SPACE ||
-         space_->identity() == SHARED_SPACE);
+         space_->identity() == SHARED_SPACE ||
+         space_->identity() == TRUSTED_SPACE);
   DCHECK(origin == AllocationOrigin::kRuntime ||
          origin == AllocationOrigin::kGC);
   DCHECK_IMPLIES(!local_heap_, origin == AllocationOrigin::kGC);
 
   base::Optional<std::pair<Address, size_t>> result =
-      space_->TryAllocationFromFreeListBackground(min_size_in_bytes,
-                                                  max_size_in_bytes, origin);
+      TryFreeListAllocation(min_size_in_bytes, max_size_in_bytes, origin);
   if (result) return result;
 
   uint64_t trace_flow_id = owning_heap()->sweeper()->GetTraceIdForFlowEvent(
@@ -211,8 +226,8 @@ ConcurrentAllocator::AllocateFromSpaceFreeList(size_t min_size_in_bytes,
     }
 
     // Retry the free list allocation.
-    result = space_->TryAllocationFromFreeListBackground(
-        min_size_in_bytes, max_size_in_bytes, origin);
+    result =
+        TryFreeListAllocation(min_size_in_bytes, max_size_in_bytes, origin);
     if (result) return result;
 
     if (owning_heap()->major_sweeping_in_progress()) {
@@ -232,8 +247,8 @@ ConcurrentAllocator::AllocateFromSpaceFreeList(size_t min_size_in_bytes,
       }
 
       if (static_cast<size_t>(max_freed) >= min_size_in_bytes) {
-        result = space_->TryAllocationFromFreeListBackground(
-            min_size_in_bytes, max_size_in_bytes, origin);
+        result =
+            TryFreeListAllocation(min_size_in_bytes, max_size_in_bytes, origin);
         if (result) return result;
       }
     }
@@ -242,8 +257,11 @@ ConcurrentAllocator::AllocateFromSpaceFreeList(size_t min_size_in_bytes,
   if (owning_heap()->ShouldExpandOldGenerationOnSlowAllocation(local_heap_,
                                                                origin) &&
       owning_heap()->CanExpandOldGeneration(space_->AreaSize())) {
-    result = space_->TryExpandBackground(max_size_in_bytes);
-    if (result) return result;
+    while (space_->TryExpand(local_heap_, origin)) {
+      result =
+          TryFreeListAllocation(min_size_in_bytes, max_size_in_bytes, origin);
+      if (result) return result;
+    }
   }
 
   if (owning_heap()->major_sweeping_in_progress()) {
@@ -257,15 +275,60 @@ ConcurrentAllocator::AllocateFromSpaceFreeList(size_t min_size_in_bytes,
     space_->RefillFreeList();
 
     // Last try to acquire memory from free list.
-    return space_->TryAllocationFromFreeListBackground(
-        min_size_in_bytes, max_size_in_bytes, origin);
+    return TryFreeListAllocation(min_size_in_bytes, max_size_in_bytes, origin);
   }
 
   return {};
 }
 
+base::Optional<std::pair<Address, size_t>>
+ConcurrentAllocator::TryFreeListAllocation(size_t min_size_in_bytes,
+                                           size_t max_size_in_bytes,
+                                           AllocationOrigin origin) {
+  base::MutexGuard lock(&space_->space_mutex_);
+  DCHECK_LE(min_size_in_bytes, max_size_in_bytes);
+  DCHECK(identity() == OLD_SPACE || identity() == CODE_SPACE ||
+         identity() == SHARED_SPACE || identity() == TRUSTED_SPACE);
+
+  size_t new_node_size = 0;
+  Tagged<FreeSpace> new_node =
+      space_->free_list_->Allocate(min_size_in_bytes, &new_node_size, origin);
+  if (new_node.is_null()) return {};
+  DCHECK_GE(new_node_size, min_size_in_bytes);
+
+  // The old-space-step might have finished sweeping and restarted marking.
+  // Verify that it did not turn the page of the new node into an evacuation
+  // candidate.
+  DCHECK(!MarkCompactCollector::IsOnEvacuationCandidate(new_node));
+
+  // Memory in the linear allocation area is counted as allocated.  We may free
+  // a little of this again immediately - see below.
+  Page* page = Page::FromHeapObject(new_node);
+  space_->IncreaseAllocatedBytes(new_node_size, page);
+
+  size_t used_size_in_bytes = std::min(new_node_size, max_size_in_bytes);
+
+  Address start = new_node.address();
+  Address end = new_node.address() + new_node_size;
+  Address limit = new_node.address() + used_size_in_bytes;
+  DCHECK_LE(limit, end);
+  DCHECK_LE(min_size_in_bytes, limit - start);
+  if (limit != end) {
+    space_->Free(limit, end - limit, SpaceAccountingMode::kSpaceAccounted);
+  }
+  space_->AddRangeToActiveSystemPages(page, start, limit);
+
+  return std::make_pair(start, used_size_in_bytes);
+}
+
 AllocationResult ConcurrentAllocator::AllocateOutsideLab(
     int size_in_bytes, AllocationAlignment alignment, AllocationOrigin origin) {
+  if (local_heap_) {
+    owning_heap()->StartIncrementalMarkingIfAllocationLimitIsReached(
+        local_heap_, owning_heap()->GCFlagsForIncrementalMarking(),
+        kGCCallbackScheduleIdleGarbageCollection);
+  }
+
   // Conservative estimate as we don't know the alignment of the allocation.
   const int requested_filler_size = Heap::GetMaximumFillToAlign(alignment);
   const int aligned_size_in_bytes = size_in_bytes + requested_filler_size;
@@ -273,8 +336,6 @@ AllocationResult ConcurrentAllocator::AllocateOutsideLab(
                                           aligned_size_in_bytes, origin);
 
   if (!result) return AllocationResult::Failure();
-
-  owning_heap()->StartIncrementalMarkingIfAllocationLimitIsReachedBackground();
 
   DCHECK_GE(result->second, aligned_size_in_bytes);
 
@@ -301,6 +362,10 @@ void ConcurrentAllocator::MakeLabIterable() {
     owning_heap()->CreateFillerObjectAtBackground(
         lab_.top(), static_cast<int>(lab_.limit() - lab_.top()));
   }
+}
+
+AllocationSpace ConcurrentAllocator::identity() const {
+  return space_->identity();
 }
 
 }  // namespace internal

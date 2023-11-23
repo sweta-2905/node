@@ -21,7 +21,7 @@ namespace internal {
 
 bool CpuFeatures::SupportsOptimizer() { return true; }
 
-void RelocInfo::apply(intptr_t delta) {
+void WritableRelocInfo::apply(intptr_t delta) {
   // On arm64 only internal references and immediate branches need extra work.
   if (RelocInfo::IsInternalReference(rmode_)) {
     // Absolute code pointer inside code object moves with the code object.
@@ -675,7 +675,7 @@ Tagged<HeapObject> RelocInfo::target_object(PtrComprCageBase cage_base) {
     return HeapObject::cast(obj);
   } else {
     return HeapObject::cast(
-        Object(Assembler::target_address_at(pc_, constant_pool_)));
+        Tagged<Object>(Assembler::target_address_at(pc_, constant_pool_)));
   }
 }
 
@@ -688,8 +688,8 @@ Handle<HeapObject> RelocInfo::target_object_handle(Assembler* origin) {
   }
 }
 
-void RelocInfo::set_target_object(Tagged<HeapObject> target,
-                                  ICacheFlushMode icache_flush_mode) {
+void WritableRelocInfo::set_target_object(Tagged<HeapObject> target,
+                                          ICacheFlushMode icache_flush_mode) {
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
   if (IsCompressedEmbeddedObject(rmode_)) {
     Assembler::set_target_compressed_address_at(
@@ -708,7 +708,7 @@ Address RelocInfo::target_external_reference() {
   return Assembler::target_address_at(pc_, constant_pool_);
 }
 
-void RelocInfo::set_target_external_reference(
+void WritableRelocInfo::set_target_external_reference(
     Address target, ICacheFlushMode icache_flush_mode) {
   DCHECK(rmode_ == RelocInfo::EXTERNAL_REFERENCE);
   Assembler::set_target_address_at(pc_, constant_pool_, target,
@@ -733,20 +733,6 @@ Builtin RelocInfo::target_builtin_at(Assembler* origin) {
 Address RelocInfo::target_off_heap_target() {
   DCHECK(IsOffHeapTarget(rmode_));
   return Assembler::target_address_at(pc_, constant_pool_);
-}
-
-void RelocInfo::WipeOut() {
-  DCHECK(IsEmbeddedObjectMode(rmode_) || IsCodeTarget(rmode_) ||
-         IsExternalReference(rmode_) || IsInternalReference(rmode_) ||
-         IsOffHeapTarget(rmode_));
-  if (IsInternalReference(rmode_)) {
-    WriteUnalignedValue<Address>(pc_, kNullAddress);
-  } else if (IsCompressedEmbeddedObject(rmode_)) {
-    Assembler::set_target_compressed_address_at(pc_, constant_pool_,
-                                                kNullAddress);
-  } else {
-    Assembler::set_target_address_at(pc_, constant_pool_, kNullAddress);
-  }
 }
 
 LoadStoreOp Assembler::LoadOpFor(const CPURegister& rt) {
@@ -884,31 +870,26 @@ Instr Assembler::Flags(FlagsUpdate S) {
 Instr Assembler::Cond(Condition cond) { return cond << Condition_offset; }
 
 Instr Assembler::ImmPCRelAddress(int imm21) {
-  CHECK(is_int21(imm21));
-  Instr imm = static_cast<Instr>(truncate_to_int21(imm21));
+  Instr imm = static_cast<Instr>(checked_truncate_to_int21(imm21));
   Instr immhi = (imm >> ImmPCRelLo_width) << ImmPCRelHi_offset;
   Instr immlo = imm << ImmPCRelLo_offset;
   return (immhi & ImmPCRelHi_mask) | (immlo & ImmPCRelLo_mask);
 }
 
 Instr Assembler::ImmUncondBranch(int imm26) {
-  CHECK(is_int26(imm26));
-  return truncate_to_int26(imm26) << ImmUncondBranch_offset;
+  return checked_truncate_to_int26(imm26) << ImmUncondBranch_offset;
 }
 
 Instr Assembler::ImmCondBranch(int imm19) {
-  CHECK(is_int19(imm19));
-  return truncate_to_int19(imm19) << ImmCondBranch_offset;
+  return checked_truncate_to_int19(imm19) << ImmCondBranch_offset;
 }
 
 Instr Assembler::ImmCmpBranch(int imm19) {
-  CHECK(is_int19(imm19));
-  return truncate_to_int19(imm19) << ImmCmpBranch_offset;
+  return checked_truncate_to_int19(imm19) << ImmCmpBranch_offset;
 }
 
 Instr Assembler::ImmTestBranch(int imm14) {
-  CHECK(is_int14(imm14));
-  return truncate_to_int14(imm14) << ImmTestBranch_offset;
+  return checked_truncate_to_int14(imm14) << ImmTestBranch_offset;
 }
 
 Instr Assembler::ImmTestBranchBit(unsigned bit_pos) {
@@ -967,8 +948,7 @@ Instr Assembler::ImmRotate(unsigned immr, unsigned reg_size) {
 }
 
 Instr Assembler::ImmLLiteral(int imm19) {
-  CHECK(is_int19(imm19));
-  return truncate_to_int19(imm19) << ImmLLiteral_offset;
+  return checked_truncate_to_int19(imm19) << ImmLLiteral_offset;
 }
 
 Instr Assembler::BitN(unsigned bitn, unsigned reg_size) {
@@ -1012,16 +992,14 @@ Instr Assembler::ImmLSUnsigned(int imm12) {
 }
 
 Instr Assembler::ImmLS(int imm9) {
-  DCHECK(is_int9(imm9));
-  return truncate_to_int9(imm9) << ImmLS_offset;
+  return checked_truncate_to_int9(imm9) << ImmLS_offset;
 }
 
 Instr Assembler::ImmLSPair(int imm7, unsigned size) {
   DCHECK_EQ(imm7,
             static_cast<int>(static_cast<uint32_t>(imm7 >> size) << size));
   int scaled_imm7 = imm7 >> size;
-  DCHECK(is_int7(scaled_imm7));
-  return truncate_to_int7(scaled_imm7) << ImmLSPair_offset;
+  return checked_truncate_to_int7(scaled_imm7) << ImmLSPair_offset;
 }
 
 Instr Assembler::ImmShiftLS(unsigned shift_amount) {

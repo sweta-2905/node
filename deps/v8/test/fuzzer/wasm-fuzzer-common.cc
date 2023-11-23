@@ -257,6 +257,10 @@ std::string HeapTypeToConstantName(HeapType heap_type) {
       return "kWasmNullFuncRef";
     case HeapType::kNoExtern:
       return "kWasmNullExternRef";
+    case HeapType::kExn:
+      return "kWasmExnRef";
+    case HeapType::kNoExn:
+      return "kWasmNullExnRef";
     case HeapType::kBottom:
       UNREACHABLE();
     default:
@@ -407,11 +411,11 @@ class InitExprInterface {
   void UnOp(FullDecoder* decoder, WasmOpcode opcode, const Value& value,
             Value* result) {
     switch (opcode) {
-      case kExprExternInternalize:
-        os_ << "kGCPrefix, kExprExternInternalize, ";
+      case kExprAnyConvertExtern:
+        os_ << "kGCPrefix, kExprAnyConvertExtern, ";
         break;
-      case kExprExternExternalize:
-        os_ << "kGCPrefix, kExprExternExternalize, ";
+      case kExprExternConvertAny:
+        os_ << "kGCPrefix, kExprExternConvertAny, ";
         break;
       default:
         UNREACHABLE();
@@ -470,8 +474,8 @@ class InitExprInterface {
     UNIMPLEMENTED();
   }
 
-  void I31New(FullDecoder* decoder, const Value& input, Value* result) {
-    os_ << "kGCPrefix, kExprI31New, ";
+  void RefI31(FullDecoder* decoder, const Value& input, Value* result) {
+    os_ << "kGCPrefix, kExprRefI31, ";
   }
 
   // Since we treat all instructions as rtt-less, we should not print rtts.
@@ -553,8 +557,7 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
         "can be\n"
         "// found in the LICENSE file.\n"
         "\n"
-        "// Flags: --wasm-staging --experimental-wasm-gc\n"
-        "// Flags: --experimental-wasm-relaxed-simd\n"
+        "// Flags: --wasm-staging\n"
         "\n"
         "d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');\n"
         "\n"
@@ -767,7 +770,11 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
 
   if (compiles) {
     os << "const instance = builder.instantiate();\n"
-          "print(instance.exports.main(1, 2, 3));\n";
+          "try {\n"
+          "  print(instance.exports.main(1, 2, 3));\n"
+          "} catch (e) {"
+          "  print('caught exception', e);"
+          "}";
   } else {
     os << "assertThrows(function() { builder.instantiate(); }, "
           "WebAssembly.CompileError);\n";

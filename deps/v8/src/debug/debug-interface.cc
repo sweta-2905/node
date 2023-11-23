@@ -228,8 +228,8 @@ void ForEachContextLocal(i::Isolate* isolate, i::Handle<i::Context> context,
 }  // namespace
 
 bool GetPrivateMembers(Local<Context> context, Local<Object> object, int filter,
-                       std::vector<Local<Value>>* names_out,
-                       std::vector<Local<Value>>* values_out) {
+                       LocalVector<Value>* names_out,
+                       LocalVector<Value>* values_out) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(context->GetIsolate());
   API_RCS_SCOPE(isolate, debug, GetPrivateMembers);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(isolate);
@@ -1022,7 +1022,7 @@ void ResetBlackboxedStateCache(Isolate* v8_isolate, Local<Script> script) {
   for (i::Tagged<i::SharedFunctionInfo> info = iter.Next(); !info.is_null();
        info = iter.Next()) {
     if (auto debug_info = isolate->debug()->TryGetDebugInfo(info)) {
-      debug_info->set_computed_debug_is_blackboxed(false);
+      debug_info.value()->set_computed_debug_is_blackboxed(false);
     }
   }
 }
@@ -1211,24 +1211,14 @@ v8::MaybeLocal<v8::Value> EvaluateGlobalForTesting(
   RETURN_ESCAPED(result);
 }
 
-void QueryObjects(v8::Local<v8::Context> v8_context,
-                  QueryObjectPredicate* predicate,
-                  std::vector<v8::Global<v8::Object>>* objects) {
-  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_context->GetIsolate());
-  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(isolate);
-  isolate->heap_profiler()->QueryObjects(Utils::OpenHandle(*v8_context),
-                                         predicate, objects);
-}
-
 void GlobalLexicalScopeNames(v8::Local<v8::Context> v8_context,
                              std::vector<v8::Global<v8::String>>* names) {
   i::Handle<i::Context> context = Utils::OpenHandle(*v8_context);
   i::Isolate* isolate = context->GetIsolate();
   i::Handle<i::ScriptContextTable> table(
       context->native_context()->script_context_table(), isolate);
-  for (int i = 0; i < table->used(kAcquireLoad); i++) {
-    i::Handle<i::Context> script_context =
-        i::ScriptContextTable::GetContext(isolate, table, i);
+  for (int i = 0; i < table->length(kAcquireLoad); i++) {
+    i::Handle<i::Context> script_context(table->get(i), isolate);
     DCHECK(script_context->IsScriptContext());
     i::Handle<i::ScopeInfo> scope_info(script_context->scope_info(), isolate);
     for (auto it : i::ScopeInfo::IterateLocalNames(scope_info)) {

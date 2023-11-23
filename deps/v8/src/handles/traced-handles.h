@@ -33,13 +33,15 @@ class V8_EXPORT_PRIVATE TracedHandles final {
                                            Address* traced_node_block_base,
                                            MarkMode mark_mode);
 
+  static bool IsValidInUseNode(Address* location);
+
   explicit TracedHandles(Isolate*);
   ~TracedHandles();
 
   TracedHandles(const TracedHandles&) = delete;
   TracedHandles& operator=(const TracedHandles&) = delete;
 
-  Handle<Object> Create(Address value, Address* slot,
+  FullObjectSlot Create(Address value, Address* slot,
                         GlobalHandleStoreMode store_mode);
 
   using NodeBounds = std::vector<std::pair<const void*, const void*>>;
@@ -63,9 +65,9 @@ class V8_EXPORT_PRIVATE TracedHandles final {
   // Computes whether young weak objects should be considered roots for young
   // generation garbage collections  or just be treated weakly. Per default
   // objects are considered as roots. Objects are treated not as root when both
-  // - `is_unmodified()` returns true;
+  // - `JSObject::IsUnmodifiedApiObject` returns true;
   // - the `EmbedderRootsHandler` also does not consider them as roots;
-  void ComputeWeaknessForYoungObjects(WeakSlotCallback is_unmodified);
+  void ComputeWeaknessForYoungObjects();
 
   void ProcessYoungObjects(RootVisitor* v,
                            WeakSlotCallbackWithHeap should_reset_handle);

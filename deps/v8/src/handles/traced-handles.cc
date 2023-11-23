@@ -9,6 +9,7 @@
 
 #include "include/v8-internal.h"
 #include "include/v8-traced-handle.h"
+#include "src/base/doubly-threaded-list.h"
 #include "src/base/logging.h"
 #include "src/base/platform/memory.h"
 #include "src/base/sanitizer/asan.h"
@@ -16,6 +17,7 @@
 #include "src/handles/handles.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/objects/objects.h"
+#include "src/objects/slots.h"
 #include "src/objects/visitors.h"
 
 namespace v8::internal {
@@ -45,8 +47,8 @@ class TracedNode final {
 
   IndexType index() const { return index_; }
 
-  bool is_root() const { return IsRoot::decode(flags_); }
-  void set_root(bool v) { flags_ = IsRoot::update(flags_, v); }
+  bool is_weak() const { return IsWeak::decode(flags_); }
+  void set_weak(bool v) { flags_ = IsWeak::update(flags_, v); }
 
   template <AccessMode access_mode = AccessMode::NON_ATOMIC>
   bool is_in_use() const {
@@ -111,20 +113,19 @@ class TracedNode final {
   }
   Address raw_object() const { return object_; }
   Tagged<Object> object() const { return Tagged<Object>(object_); }
-  Handle<Object> handle() { return Handle<Object>(&object_); }
   FullObjectSlot location() { return FullObjectSlot(&object_); }
 
-  Handle<Object> Publish(Tagged<Object> object, bool needs_young_bit_update,
+  FullObjectSlot Publish(Tagged<Object> object, bool needs_young_bit_update,
                          bool needs_black_allocation, bool has_old_host);
   void Release();
 
  private:
   using IsInUse = base::BitField8<bool, 0, 1>;
   using IsInYoungList = IsInUse::Next<bool, 1>;
-  using IsRoot = IsInYoungList::Next<bool, 1>;
+  using IsWeak = IsInYoungList::Next<bool, 1>;
   // The markbit is the exception as it can be set from the main and marker
   // threads at the same time.
-  using Markbit = IsRoot::Next<bool, 1>;
+  using Markbit = IsWeak::Next<bool, 1>;
   using HasOldHost = Markbit::Next<bool, 1>;
 
   Address object_ = kNullAddress;
@@ -146,18 +147,18 @@ TracedNode::TracedNode(IndexType index, IndexType next_free_index)
   static_assert(sizeof(TracedNode) <= (2 * kSystemPointerSize));
   DCHECK(!is_in_use());
   DCHECK(!is_in_young_list());
-  DCHECK(!is_root());
+  DCHECK(!is_weak());
   DCHECK(!markbit());
   DCHECK(!has_old_host());
 }
 
 // Publishes all internal state to be consumed by other threads.
-Handle<Object> TracedNode::Publish(Tagged<Object> object,
+FullObjectSlot TracedNode::Publish(Tagged<Object> object,
                                    bool needs_young_bit_update,
                                    bool needs_black_allocation,
                                    bool has_old_host) {
   DCHECK(!is_in_use());
-  DCHECK(!is_root());
+  DCHECK(!is_weak());
   DCHECK(!markbit());
   set_class_id(0);
   if (needs_young_bit_update) {
@@ -170,11 +171,10 @@ Handle<Object> TracedNode::Publish(Tagged<Object> object,
     DCHECK(is_in_young_list());
     set_has_old_host(true);
   }
-  set_root(true);
   set_is_in_use(true);
   reinterpret_cast<std::atomic<Address>*>(&object_)->store(
       object.ptr(), std::memory_order_release);
-  return Handle<Object>(&object_);
+  return FullObjectSlot(&object_);
 }
 
 void TracedNode::Release() {
@@ -183,127 +183,13 @@ void TracedNode::Release() {
   // TracedHandlesImpl::young_nodes_;
   flags_ &= IsInYoungList::encode(true);
   DCHECK(!is_in_use());
-  DCHECK(!is_root());
+  DCHECK(!is_weak());
   DCHECK(!markbit());
   DCHECK(!has_old_host());
   set_raw_object(kGlobalHandleZapValue);
 }
 
-template <typename T, typename NodeAccessor>
-class DoublyLinkedList final {
-  template <typename U>
-  class IteratorImpl final
-      : public base::iterator<std::forward_iterator_tag, U> {
-   public:
-    explicit IteratorImpl(U* object) : object_(object) {}
-    IteratorImpl(const IteratorImpl& other) V8_NOEXCEPT
-        : object_(other.object_) {}
-    U* operator*() { return object_; }
-    bool operator==(const IteratorImpl& rhs) const {
-      return rhs.object_ == object_;
-    }
-    bool operator!=(const IteratorImpl& rhs) const { return !(*this == rhs); }
-    inline IteratorImpl& operator++() {
-      object_ = ListNodeFor(object_)->next;
-      return *this;
-    }
-    inline IteratorImpl operator++(int) {
-      IteratorImpl tmp(*this);
-      operator++();
-      return tmp;
-    }
-
-   private:
-    U* object_;
-  };
-
- public:
-  using Iterator = IteratorImpl<T>;
-  using ConstIterator = IteratorImpl<const T>;
-
-  struct ListNode {
-    T* prev = nullptr;
-    T* next = nullptr;
-  };
-
-  T* Front() { return front_; }
-
-  void PushFront(T* object) {
-    DCHECK(!Contains(object));
-    ListNodeFor(object)->next = front_;
-    if (front_) {
-      ListNodeFor(front_)->prev = object;
-    }
-    front_ = object;
-    size_++;
-  }
-
-  void PopFront() {
-    DCHECK(!Empty());
-    if (ListNodeFor(front_)->next) {
-      ListNodeFor(ListNodeFor(front_)->next)->prev = nullptr;
-    }
-    front_ = ListNodeFor(front_)->next;
-    size_--;
-  }
-
-  void Remove(T* object) {
-    DCHECK(Contains(object));
-    auto& next_object = ListNodeFor(object)->next;
-    auto& prev_object = ListNodeFor(object)->prev;
-    if (front_ == object) {
-      front_ = next_object;
-    }
-    if (next_object) {
-      ListNodeFor(next_object)->prev = prev_object;
-    }
-    if (prev_object) {
-      ListNodeFor(prev_object)->next = next_object;
-    }
-    next_object = nullptr;
-    prev_object = nullptr;
-    size_--;
-  }
-
-  bool Contains(T* object) const {
-    if (front_ == object) return true;
-    auto* list_node = ListNodeFor(object);
-    return list_node->prev || list_node->next;
-  }
-
-  size_t Size() const { return size_; }
-  bool Empty() const { return size_ == 0; }
-
-  Iterator begin() { return Iterator(front_); }
-  Iterator end() { return Iterator(nullptr); }
-  ConstIterator begin() const { return ConstIterator(front_); }
-  ConstIterator end() const { return ConstIterator(nullptr); }
-
- private:
-  static ListNode* ListNodeFor(T* object) {
-    return NodeAccessor::GetListNode(object);
-  }
-  static const ListNode* ListNodeFor(const T* object) {
-    return NodeAccessor::GetListNode(const_cast<T*>(object));
-  }
-
-  T* front_ = nullptr;
-  size_t size_ = 0;
-};
-
 class TracedNodeBlock final {
-  struct OverallListNode {
-    static auto* GetListNode(TracedNodeBlock* block) {
-      return &block->overall_list_node_;
-    }
-  };
-
-  struct UsableListNode {
-    static auto* GetListNode(TracedNodeBlock* block) {
-      return &block->usable_list_node_;
-    }
-  };
-
   class NodeIteratorImpl final
       : public base::iterator<std::forward_iterator_tag, TracedNode> {
    public:
@@ -337,9 +223,39 @@ class TracedNodeBlock final {
     TracedNode::IndexType current_index_ = 0;
   };
 
+  struct ListNode final {
+    TracedNodeBlock** prev_ = nullptr;
+    TracedNodeBlock* next_ = nullptr;
+  };
+
+  template <typename ConcreteTraits>
+  struct BaseListTraits {
+    static TracedNodeBlock*** prev(TracedNodeBlock* tnb) {
+      return &ConcreteTraits::GetListNode(tnb).prev_;
+    }
+    static TracedNodeBlock** next(TracedNodeBlock* tnb) {
+      return &ConcreteTraits::GetListNode(tnb).next_;
+    }
+    static bool non_empty(TracedNodeBlock* tnb) { return tnb != nullptr; }
+  };
+
  public:
-  using OverallList = DoublyLinkedList<TracedNodeBlock, OverallListNode>;
-  using UsableList = DoublyLinkedList<TracedNodeBlock, UsableListNode>;
+  struct OverallListTraits : BaseListTraits<OverallListTraits> {
+    static ListNode& GetListNode(TracedNodeBlock* tnb) {
+      return tnb->overall_list_node_;
+    }
+  };
+
+  struct UsableListTraits : BaseListTraits<UsableListTraits> {
+    static ListNode& GetListNode(TracedNodeBlock* tnb) {
+      return tnb->usable_list_node_;
+    }
+  };
+
+  using OverallList =
+      v8::base::DoublyThreadedList<TracedNodeBlock*, OverallListTraits>;
+  using UsableList =
+      v8::base::DoublyThreadedList<TracedNodeBlock*, UsableListTraits>;
   using Iterator = NodeIteratorImpl;
 
 #if defined(V8_USE_ADDRESS_SANITIZER)
@@ -360,7 +276,7 @@ class TracedNodeBlock final {
   static_assert(kMinCapacity <= kMaxCapacity);
   static_assert(kInvalidFreeListNodeIndex > kMaxCapacity);
 
-  static TracedNodeBlock* Create(TracedHandlesImpl&, OverallList&, UsableList&);
+  static TracedNodeBlock* Create(TracedHandlesImpl&);
   static void Delete(TracedNodeBlock*);
 
   static TracedNodeBlock& From(TracedNode& node);
@@ -392,11 +308,10 @@ class TracedNodeBlock final {
   }
 
  private:
-  TracedNodeBlock(TracedHandlesImpl&, OverallList&, UsableList&,
-                  TracedNode::IndexType);
+  TracedNodeBlock(TracedHandlesImpl&, TracedNode::IndexType);
 
-  OverallList::ListNode overall_list_node_;
-  UsableList::ListNode usable_list_node_;
+  ListNode overall_list_node_;
+  ListNode usable_list_node_;
   TracedHandlesImpl& traced_handles_;
   TracedNode::IndexType used_ = 0;
   const TracedNode::IndexType capacity_ = 0;
@@ -404,9 +319,7 @@ class TracedNodeBlock final {
 };
 
 // static
-TracedNodeBlock* TracedNodeBlock::Create(TracedHandlesImpl& traced_handles,
-                                         OverallList& overall_list,
-                                         UsableList& usable_list) {
+TracedNodeBlock* TracedNodeBlock::Create(TracedHandlesImpl& traced_handles) {
   static_assert(alignof(TracedNodeBlock) >= alignof(TracedNode));
   static_assert(sizeof(TracedNodeBlock) % alignof(TracedNode) == 0,
                 "TracedNodeBlock size is used to auto-align node FAM storage.");
@@ -419,25 +332,20 @@ TracedNodeBlock* TracedNodeBlock::Create(TracedHandlesImpl& traced_handles,
       kMaxCapacity);
   CHECK_LT(capacity, std::numeric_limits<TracedNode::IndexType>::max());
   const auto result = std::make_pair(raw_result.ptr, capacity);
-  return new (result.first)
-      TracedNodeBlock(traced_handles, overall_list, usable_list,
-                      static_cast<TracedNode::IndexType>(result.second));
+  return new (result.first) TracedNodeBlock(
+      traced_handles, static_cast<TracedNode::IndexType>(result.second));
 }
 
 // static
 void TracedNodeBlock::Delete(TracedNodeBlock* block) { free(block); }
 
 TracedNodeBlock::TracedNodeBlock(TracedHandlesImpl& traced_handles,
-                                 OverallList& overall_list,
-                                 UsableList& usable_list,
                                  TracedNode::IndexType capacity)
     : traced_handles_(traced_handles), capacity_(capacity) {
   for (TracedNode::IndexType i = 0; i < (capacity_ - 1); i++) {
     new (at(i)) TracedNode(i, i + 1);
   }
   new (at(capacity_ - 1)) TracedNode(capacity_ - 1, kInvalidFreeListNodeIndex);
-  overall_list.PushFront(this);
-  usable_list.PushFront(this);
 }
 
 // static
@@ -453,11 +361,7 @@ const TracedNodeBlock& TracedNodeBlock::From(const TracedNode& node) {
 }
 
 TracedNode* TracedNodeBlock::AllocateNode() {
-  if (used_ == capacity_) {
-    DCHECK_EQ(first_free_node_, kInvalidFreeListNodeIndex);
-    return nullptr;
-  }
-
+  DCHECK_NE(used_, capacity_);
   DCHECK_NE(first_free_node_, kInvalidFreeListNodeIndex);
   auto* node = at(first_free_node_);
   first_free_node_ = node->next_free();
@@ -507,7 +411,7 @@ class TracedHandlesImpl final {
   explicit TracedHandlesImpl(Isolate*);
   ~TracedHandlesImpl();
 
-  Handle<Object> Create(Address value, Address* slot,
+  FullObjectSlot Create(Address value, Address* slot,
                         GlobalHandleStoreMode store_mode);
   void Destroy(TracedNodeBlock& node_block, TracedNode& node);
   void Copy(const TracedNode& from_node, Address** to);
@@ -526,7 +430,7 @@ class TracedHandlesImpl final {
   void ResetDeadNodes(WeakSlotCallbackWithHeap should_reset_handle);
   void ResetYoungDeadNodes(WeakSlotCallbackWithHeap should_reset_handle);
 
-  void ComputeWeaknessForYoungObjects(WeakSlotCallback is_unmodified);
+  void ComputeWeaknessForYoungObjects();
   void ProcessYoungObjects(RootVisitor* visitor,
                            WeakSlotCallbackWithHeap should_reset_handle);
 
@@ -544,6 +448,7 @@ class TracedHandlesImpl final {
 
  private:
   TracedNode* AllocateNode();
+  V8_NOINLINE V8_PRESERVE_MOST void RefillUsableNodeBlocks();
   void FreeNode(TracedNode*);
 
   bool NeedsToBeRemembered(Tagged<Object> value, TracedNode* node,
@@ -551,6 +456,7 @@ class TracedHandlesImpl final {
                            GlobalHandleStoreMode store_mode) const;
 
   TracedNodeBlock::OverallList blocks_;
+  size_t num_blocks_ = 0;
   TracedNodeBlock::UsableList usable_blocks_;
   // List of young nodes. May refer to nodes in `blocks_`, `usable_blocks_`, and
   // `empty_block_candidates_`.
@@ -567,45 +473,52 @@ class TracedHandlesImpl final {
   size_t block_size_bytes_ = 0;
 };
 
-TracedNode* TracedHandlesImpl::AllocateNode() {
-  auto* block = usable_blocks_.Front();
-  if (!block) {
-    if (empty_blocks_.empty() && empty_block_candidates_.empty()) {
-      block = TracedNodeBlock::Create(*this, blocks_, usable_blocks_);
-      block_size_bytes_ += block->size_bytes();
-    } else {
-      // Pick a block from candidates first as such blocks may anyways still be
-      // referred to from young nodes and thus are not eligible for freeing.
-      auto& block_source = empty_block_candidates_.empty()
-                               ? empty_blocks_
-                               : empty_block_candidates_;
-      block = block_source.back();
-      block_source.pop_back();
-      DCHECK(block->IsEmpty());
-      usable_blocks_.PushFront(block);
-      blocks_.PushFront(block);
-    }
-    DCHECK_EQ(block, usable_blocks_.Front());
+void TracedHandlesImpl::RefillUsableNodeBlocks() {
+  TracedNodeBlock* block;
+  if (empty_blocks_.empty() && empty_block_candidates_.empty()) {
+    block = TracedNodeBlock::Create(*this);
+    block_size_bytes_ += block->size_bytes();
+  } else {
+    // Pick a block from candidates first as such blocks may anyways still be
+    // referred to from young nodes and thus are not eligible for freeing.
+    auto& block_source = empty_block_candidates_.empty()
+                             ? empty_blocks_
+                             : empty_block_candidates_;
+    block = block_source.back();
+    block_source.pop_back();
   }
-  auto* node = block->AllocateNode();
-  if (node) {
-    used_nodes_++;
-    return node;
-  }
+  usable_blocks_.PushFront(block);
+  blocks_.PushFront(block);
+  num_blocks_++;
+  DCHECK(block->IsEmpty());
+  DCHECK_EQ(usable_blocks_.Front(), block);
+  DCHECK(!usable_blocks_.empty());
+}
 
-  usable_blocks_.Remove(block);
-  return AllocateNode();
+TracedNode* TracedHandlesImpl::AllocateNode() {
+  if (V8_UNLIKELY(usable_blocks_.empty())) {
+    RefillUsableNodeBlocks();
+  }
+  TracedNodeBlock* block = usable_blocks_.Front();
+  auto* node = block->AllocateNode();
+  if (V8_UNLIKELY(block->IsFull())) {
+    usable_blocks_.Remove(block);
+  }
+  used_nodes_++;
+  return node;
 }
 
 void TracedHandlesImpl::FreeNode(TracedNode* node) {
   auto& block = TracedNodeBlock::From(*node);
-  if (block.IsFull() && !usable_blocks_.Contains(&block)) {
+  if (V8_UNLIKELY(block.IsFull())) {
+    DCHECK(!usable_blocks_.ContainsSlow(&block));
     usable_blocks_.PushFront(&block);
   }
   block.FreeNode(node);
   if (block.IsEmpty()) {
     usable_blocks_.Remove(&block);
     blocks_.Remove(&block);
+    num_blocks_--;
     empty_block_candidates_.push_back(&block);
   }
   used_nodes_--;
@@ -615,7 +528,7 @@ TracedHandlesImpl::TracedHandlesImpl(Isolate* isolate) : isolate_(isolate) {}
 
 TracedHandlesImpl::~TracedHandlesImpl() {
   size_t block_size_bytes = 0;
-  while (!blocks_.Empty()) {
+  while (!blocks_.empty()) {
     auto* block = blocks_.Front();
     blocks_.PopFront();
     block_size_bytes += block->size_bytes();
@@ -643,6 +556,11 @@ bool TracedHandlesImpl::NeedsToBeRemembered(
     Tagged<Object> object, TracedNode* node, Address* slot,
     GlobalHandleStoreMode store_mode) const {
   DCHECK(!node->has_old_host());
+
+  auto* cpp_heap = GetCppHeapIfUnifiedYoungGC(isolate_);
+  if (!cpp_heap) {
+    return false;
+  }
   if (store_mode == GlobalHandleStoreMode::kInitializingStore) {
     // Don't record initializing stores.
     return false;
@@ -651,31 +569,37 @@ bool TracedHandlesImpl::NeedsToBeRemembered(
     // If marking is in progress, the marking barrier will be issued later.
     return false;
   }
-  auto* cpp_heap = GetCppHeapIfUnifiedYoungGC(isolate_);
-  if (!cpp_heap) return false;
-
-  if (!ObjectInYoungGeneration(object)) return false;
+  if (!ObjectInYoungGeneration(object)) {
+    return false;
+  }
   return IsCppGCHostOld(*cpp_heap, reinterpret_cast<Address>(slot));
 }
 
-Handle<Object> TracedHandlesImpl::Create(Address value, Address* slot,
+FullObjectSlot TracedHandlesImpl::Create(Address value, Address* slot,
                                          GlobalHandleStoreMode store_mode) {
+  DCHECK_NOT_NULL(slot);
   Tagged<Object> object(value);
   auto* node = AllocateNode();
-  bool needs_young_bit_update = false;
-  if (NeedsTrackingInYoungNodes(object, node)) {
-    needs_young_bit_update = true;
+  const bool needs_young_bit_update = NeedsTrackingInYoungNodes(object, node);
+  const bool has_old_host = NeedsToBeRemembered(object, node, slot, store_mode);
+  const bool needs_black_allocation =
+      is_marking_ && store_mode != GlobalHandleStoreMode::kInitializingStore;
+  auto result_slot = node->Publish(object, needs_young_bit_update,
+                                   needs_black_allocation, has_old_host);
+  // Write barrier and young node tracking may be reordered, so move them below
+  // `Publish()`.
+  if (needs_young_bit_update) {
     young_nodes_.push_back(node);
   }
-
-  const bool has_old_host = NeedsToBeRemembered(object, node, slot, store_mode);
-  bool needs_black_allocation = false;
-  if (is_marking_ && store_mode != GlobalHandleStoreMode::kInitializingStore) {
-    needs_black_allocation = true;
+  if (needs_black_allocation) {
     WriteBarrier::MarkingFromGlobalHandle(object);
   }
-  return node->Publish(object, needs_young_bit_update, needs_black_allocation,
-                       has_old_host);
+#ifdef VERIFY_HEAP
+  if (i::v8_flags.verify_heap) {
+    Object::ObjectVerify(*result_slot, isolate_);
+  }
+#endif  // VERIFY_HEAP
+  return result_slot;
 }
 
 void TracedHandlesImpl::Destroy(TracedNodeBlock& node_block, TracedNode& node) {
@@ -713,7 +637,7 @@ void TracedHandlesImpl::Destroy(TracedNodeBlock& node_block, TracedNode& node) {
 
 void TracedHandlesImpl::Copy(const TracedNode& from_node, Address** to) {
   DCHECK_NE(kGlobalHandleZapValue, from_node.raw_object());
-  Handle<Object> o =
+  FullObjectSlot o =
       Create(from_node.raw_object(), reinterpret_cast<Address*>(to),
              GlobalHandleStoreMode::kAssigningStore);
   SetSlotThreadSafe(to, o.location());
@@ -774,7 +698,7 @@ void TracedHandlesImpl::SetIsSweepingOnMutatorThread(bool value) {
 
 const TracedHandles::NodeBounds TracedHandlesImpl::GetNodeBounds() const {
   TracedHandles::NodeBounds block_bounds;
-  block_bounds.reserve(blocks_.Size());
+  block_bounds.reserve(num_blocks_);
   for (const auto* block : blocks_) {
     block_bounds.push_back(
         {block->nodes_begin_address(), block->nodes_end_address()});
@@ -883,27 +807,34 @@ void TracedHandlesImpl::ResetYoungDeadNodes(
   }
 }
 
-void TracedHandlesImpl::ComputeWeaknessForYoungObjects(
-    WeakSlotCallback is_unmodified) {
+namespace {
+void ComputeWeaknessForYoungObject(EmbedderRootsHandler* handler,
+                                   TracedNode* node) {
+  DCHECK(!node->is_weak());
+  bool is_unmodified_api_object =
+      JSObject::IsUnmodifiedApiObject(node->location());
+  if (is_unmodified_api_object) {
+    FullObjectSlot slot = node->location();
+    node->set_weak(!handler->IsRoot(
+        *reinterpret_cast<v8::TracedReference<v8::Value>*>(&slot)));
+  }
+}
+}  // namespace
+
+void TracedHandlesImpl::ComputeWeaknessForYoungObjects() {
   if (!v8_flags.reclaim_unmodified_wrappers) return;
 
   // Treat all objects as roots during incremental marking to avoid corrupting
   // marking worklists.
+  DCHECK_IMPLIES(v8_flags.minor_ms, !is_marking_);
   if (is_marking_) return;
 
   auto* const handler = isolate_->heap()->GetEmbedderRootsHandler();
   if (!handler) return;
 
   for (TracedNode* node : young_nodes_) {
-    if (node->is_in_use()) {
-      DCHECK(node->is_root());
-      if (is_unmodified(node->location())) {
-        v8::Value* value = ToApi<v8::Value>(node->handle());
-        bool r = handler->IsRoot(
-            *reinterpret_cast<v8::TracedReference<v8::Value>*>(&value));
-        node->set_root(r);
-      }
-    }
+    if (!node->is_in_use()) continue;
+    ComputeWeaknessForYoungObject(handler, node);
   }
 }
 
@@ -914,9 +845,9 @@ void TracedHandlesImpl::ProcessYoungObjects(
   auto* const handler = isolate_->heap()->GetEmbedderRootsHandler();
   if (!handler) return;
 
-  // If CppGC is attached, since the embeeder may trigger allocations in
-  // ResetRoot().
+  // ResetRoot should not trigger allocations in CppGC.
   if (auto* cpp_heap = CppHeap::From(isolate_->heap()->cpp_heap())) {
+    cpp_heap->EnterDisallowGCScope();
     cpp_heap->EnterNoGCScope();
   }
 
@@ -924,18 +855,18 @@ void TracedHandlesImpl::ProcessYoungObjects(
     if (!node->is_in_use()) continue;
 
     bool should_reset = should_reset_handle(isolate_->heap(), node->location());
-    CHECK_IMPLIES(node->is_root(), !should_reset);
+    CHECK_IMPLIES(!node->is_weak(), !should_reset);
     if (should_reset) {
       CHECK(!is_marking_);
-      v8::Value* value = ToApi<v8::Value>(node->handle());
+      FullObjectSlot slot = node->location();
       handler->ResetRoot(
-          *reinterpret_cast<v8::TracedReference<v8::Value>*>(&value));
+          *reinterpret_cast<v8::TracedReference<v8::Value>*>(&slot));
       // We cannot check whether a node is in use here as the reset behavior
       // depends on whether incremental marking is running when reclaiming
       // young objects.
     } else {
-      if (!node->is_root()) {
-        node->set_root(true);
+      if (node->is_weak()) {
+        node->set_weak(false);
         if (visitor) {
           visitor->VisitRootPointer(Root::kGlobalHandles, nullptr,
                                     node->location());
@@ -946,6 +877,7 @@ void TracedHandlesImpl::ProcessYoungObjects(
 
   if (auto* cpp_heap = CppHeap::From(isolate_->heap()->cpp_heap())) {
     cpp_heap->LeaveNoGCScope();
+    cpp_heap->LeaveDisallowGCScope();
   }
 }
 
@@ -972,9 +904,9 @@ void TracedHandlesImpl::IterateYoungRoots(RootVisitor* visitor) {
   for (auto* node : young_nodes_) {
     if (!node->is_in_use()) continue;
 
-    CHECK_IMPLIES(is_marking_, node->is_root());
+    CHECK_IMPLIES(is_marking_, !node->is_weak());
 
-    if (!node->is_root()) continue;
+    if (node->is_weak()) continue;
 
     visitor->VisitRootPointer(Root::kTracedHandles, nullptr, node->location());
   }
@@ -986,9 +918,9 @@ void TracedHandlesImpl::IterateAndMarkYoungRootsWithOldHosts(
     if (!node->is_in_use()) continue;
     if (!node->has_old_host()) continue;
 
-    CHECK_IMPLIES(is_marking_, node->is_root());
+    CHECK_IMPLIES(is_marking_, !node->is_weak());
 
-    if (!node->is_root()) continue;
+    if (node->is_weak()) continue;
 
     node->set_markbit();
     CHECK(ObjectInYoungGeneration(node->object()));
@@ -1002,9 +934,9 @@ void TracedHandlesImpl::IterateYoungRootsWithOldHostsForTesting(
     if (!node->is_in_use()) continue;
     if (!node->has_old_host()) continue;
 
-    CHECK_IMPLIES(is_marking_, node->is_root());
+    CHECK_IMPLIES(is_marking_, !node->is_weak());
 
-    if (!node->is_root()) continue;
+    if (node->is_weak()) continue;
 
     visitor->VisitRootPointer(Root::kTracedHandles, nullptr, node->location());
   }
@@ -1015,7 +947,7 @@ TracedHandles::TracedHandles(Isolate* isolate)
 
 TracedHandles::~TracedHandles() = default;
 
-Handle<Object> TracedHandles::Create(Address value, Address* slot,
+FullObjectSlot TracedHandles::Create(Address value, Address* slot,
                                      GlobalHandleStoreMode store_mode) {
   return impl_->Create(value, slot, store_mode);
 }
@@ -1048,9 +980,8 @@ void TracedHandles::ResetYoungDeadNodes(
   impl_->ResetYoungDeadNodes(should_reset_handle);
 }
 
-void TracedHandles::ComputeWeaknessForYoungObjects(
-    WeakSlotCallback is_unmodified) {
-  impl_->ComputeWeaknessForYoungObjects(is_unmodified);
+void TracedHandles::ComputeWeaknessForYoungObjects() {
+  impl_->ComputeWeaknessForYoungObjects();
 }
 
 void TracedHandles::ProcessYoungObjects(
@@ -1167,6 +1098,17 @@ Tagged<Object> TracedHandles::MarkConservatively(
   // state concurrently to setting the markbit is safe.
   if (!node.is_in_use<AccessMode::ATOMIC>()) return Smi::zero();
   return MarkObject(node.object(), node, mark_mode);
+}
+
+bool TracedHandles::IsValidInUseNode(Address* location) {
+  TracedNode* node = TracedNode::FromLocation(location);
+  // This method is called after mark bits have been cleared.
+  DCHECK(!node->markbit<AccessMode::NON_ATOMIC>());
+  CHECK_IMPLIES(node->is_in_use<AccessMode::NON_ATOMIC>(),
+                node->raw_object() != kGlobalHandleZapValue);
+  CHECK_IMPLIES(!node->is_in_use<AccessMode::NON_ATOMIC>(),
+                node->raw_object() == kGlobalHandleZapValue);
+  return node->is_in_use<AccessMode::NON_ATOMIC>();
 }
 
 bool TracedHandles::HasYoung() const { return impl_->HasYoung(); }

@@ -223,24 +223,8 @@ consts_misc = [
         'value': 'Oddball::kNull'
     },
     {
-        'name': 'OddballArgumentsMarker',
-        'value': 'Oddball::kArgumentsMarker'
-    },
-    {
         'name': 'OddballUndefined',
         'value': 'Oddball::kUndefined'
-    },
-    {
-        'name': 'OddballUninitialized',
-        'value': 'Oddball::kUninitialized'
-    },
-    {
-        'name': 'OddballOther',
-        'value': 'Oddball::kOther'
-    },
-    {
-        'name': 'OddballException',
-        'value': 'Oddball::kException'
     },
     {
         'name': 'ContextRegister',
@@ -424,13 +408,11 @@ consts_misc = [
     },
     {
         'name': 'off_fp_bytecode_array',
-        'value': 'UnoptimizedFrameConstants::kBytecodeArrayFromFp'
+        'value': 'InterpreterFrameConstants::kBytecodeArrayFromFp'
     },
     {
-        'name':
-            'off_fp_bytecode_offset',
-        'value':
-            'UnoptimizedFrameConstants::kBytecodeOffsetOrFeedbackVectorFromFp'
+        'name': 'off_fp_bytecode_offset',
+        'value': 'InterpreterFrameConstants::kBytecodeOffsetFromFp'
     },
     {
         'name': 'scopeinfo_idx_nparams',
@@ -515,6 +497,7 @@ consts_misc = [
 # in this "extras_accessors" table.
 #
 extras_accessors = [
+    'JSFunction, code, Tagged<Code>, kCodeOffset',
     'JSFunction, context, Context, kContextOffset',
     'JSFunction, shared, SharedFunctionInfo, kSharedFunctionInfoOffset',
     'HeapObject, map, Map, kMapOffset',
@@ -553,6 +536,10 @@ extras_accessors = [
     'SharedFunctionInfo, flags, int, kFlagsOffset',
     'SharedFunctionInfo, length, uint16_t, kLengthOffset',
     'SlicedString, parent, String, kParentOffset',
+    'Code, flags, uint32_t, kFlagsOffset',
+    'Code, instruction_start, Address, kInstructionStartOffset',
+    'Code, instruction_stream, Tagged<InstructionStream>, kInstructionStreamOffset',
+    'Code, instruction_size, int, kInstructionSizeOffset',
     'InstructionStream, instruction_start, uintptr_t, kHeaderSize',
     'String, length, int32_t, kLengthOffset',
     'DescriptorArray, header_size, uintptr_t, kHeaderSize',
@@ -744,7 +731,7 @@ def load_objects_from_file(objfilename, checktypes):
   #
   entries = typestr.split(',');
   for entry in entries:
-    types[re.sub('\s*=.*', '', entry).lstrip()] = True;
+    types[re.sub(r'\s*=.*', '', entry).lstrip()] = True
   entries = torque_typestr.split('\\')
   for entry in entries:
     name = re.sub(r' *V\(|\).*', '', entry)
@@ -757,7 +744,7 @@ def load_objects_from_file(objfilename, checktypes):
     start = entry.find('(');
     end = entry.find(')', start);
     rest = entry[start + 1: end];
-    args = re.split('\s*,\s*', rest);
+    args = re.split(r'\s*,\s*', rest)
     typename = args[0]
     typeconst = args[1]
     types[typeconst] = True
@@ -840,7 +827,7 @@ def parse_field(call):
   idx = call.find('(');
   kind = call[0:idx];
   rest = call[idx + 1: len(call) - 1];
-  args = re.split('\s*,\s*', rest);
+  args = re.split(r'\s*,\s*', rest)
 
   klass = args[0];
   field = args[1];
@@ -939,7 +926,7 @@ def emit_constants(out, consts):
 
   # Fix up overzealous parses.  This could be done inside the
   # parsers but as there are several, it's easiest to do it here.
-  ws = re.compile('\s+')
+  ws = re.compile(r'\s+')
   for const in consts:
     name = ws.sub('', const['name'])
     value = ws.sub('', str(const['value']))  # Can be a number.

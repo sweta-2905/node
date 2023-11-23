@@ -2955,8 +2955,7 @@ TEST(PauseInScript) {
   const char* src = "(function (evt) {})";
   const char* script_name = "StepInHandlerTest";
 
-  v8::ScriptOrigin origin(env->GetIsolate(),
-                          v8_str(env->GetIsolate(), script_name));
+  v8::ScriptOrigin origin(v8_str(env->GetIsolate(), script_name));
   v8::Local<v8::Script> script =
       v8::Script::Compile(context, v8_str(env->GetIsolate(), src), &origin)
           .ToLocalChecked();
@@ -3334,7 +3333,7 @@ TEST(DebugScriptLineEndsAreAscending) {
                                                "  debugger;\n"
                                                "}\n");
 
-  v8::ScriptOrigin origin1 = v8::ScriptOrigin(isolate, v8_str(isolate, "name"));
+  v8::ScriptOrigin origin1 = v8::ScriptOrigin(v8_str(isolate, "name"));
   v8::Local<v8::Script> script =
       v8::Script::Compile(env.local(), script_source, &origin1)
           .ToLocalChecked();
@@ -4952,8 +4951,8 @@ TEST(GetPrivateFields) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "x"))
           .ToLocalChecked());
-  std::vector<v8::Local<v8::Value>> names;
-  std::vector<v8::Local<v8::Value>> values;
+  v8::LocalVector<v8::Value> names(v8_isolate);
+  v8::LocalVector<v8::Value> values(v8_isolate);
   int filter = static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateFields);
   CHECK(v8::debug::GetPrivateMembers(context, object, filter, &names, &values));
 
@@ -5059,8 +5058,8 @@ TEST(GetPrivateMethodsAndAccessors) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "x"))
           .ToLocalChecked());
-  std::vector<v8::Local<v8::Value>> names;
-  std::vector<v8::Local<v8::Value>> values;
+  v8::LocalVector<v8::Value> names(v8_isolate);
+  v8::LocalVector<v8::Value> values(v8_isolate);
 
   int accessor_filter =
       static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateAccessors);
@@ -5229,8 +5228,8 @@ TEST(GetPrivateStaticMethodsAndAccessors) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "X"))
           .ToLocalChecked());
-  std::vector<v8::Local<v8::Value>> names;
-  std::vector<v8::Local<v8::Value>> values;
+  v8::LocalVector<v8::Value> names(v8_isolate);
+  v8::LocalVector<v8::Value> values(v8_isolate);
 
   int accessor_filter =
       static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateAccessors);
@@ -5302,8 +5301,8 @@ TEST(GetPrivateStaticAndInstanceMethodsAndAccessors) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "X"))
           .ToLocalChecked());
-  std::vector<v8::Local<v8::Value>> names;
-  std::vector<v8::Local<v8::Value>> values;
+  v8::LocalVector<v8::Value> names(v8_isolate);
+  v8::LocalVector<v8::Value> values(v8_isolate);
   int accessor_filter =
       static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateAccessors);
   int method_filter =

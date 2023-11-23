@@ -43,7 +43,7 @@ class MicrotaskQueueBuiltinsAssembler : public CodeStubAssembler {
   void SetCurrentContext(TNode<Context> context);
 
   TNode<IntPtrT> GetEnteredContextCount();
-  void EnterMicrotaskContext(TNode<Context> native_context);
+  void EnterContext(TNode<Context> native_context);
   void RewindEnteredContext(TNode<IntPtrT> saved_entered_context_count);
 
   void RunAllPromiseHooks(PromiseHookType type, TNode<Context> context,
@@ -111,7 +111,7 @@ void MicrotaskQueueBuiltinsAssembler::PrepareForContext(
   GotoIf(WordEqual(GetMicrotaskQueue(native_context), IntPtrConstant(0)),
          bailout);
 
-  EnterMicrotaskContext(native_context);
+  EnterContext(native_context);
   SetCurrentContext(native_context);
 }
 
@@ -235,16 +235,16 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
     const TNode<HeapObject> promise_or_capability = CAST(LoadObjectField(
         microtask, PromiseReactionJobTask::kPromiseOrCapabilityOffset));
 
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
     TNode<Object> preserved_embedder_data = LoadObjectField(
         microtask,
         PromiseReactionJobTask::kContinuationPreservedEmbedderDataOffset);
     Label preserved_data_done(this);
     GotoIf(IsUndefined(preserved_embedder_data), &preserved_data_done);
-    StoreContextElement(native_context,
-                        Context::CONTINUATION_PRESERVED_EMBEDDER_DATA_INDEX,
-                        preserved_embedder_data);
+    SetContinuationPreservedEmbedderData(preserved_embedder_data);
     Goto(&preserved_data_done);
     BIND(&preserved_data_done);
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 
     // Run the promise before/debug hook if enabled.
     RunAllPromiseHooks(PromiseHookType::kBefore, microtask_context,
@@ -260,13 +260,13 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
     RunAllPromiseHooks(PromiseHookType::kAfter, microtask_context,
                        promise_or_capability);
 
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
     Label preserved_data_reset_done(this);
     GotoIf(IsUndefined(preserved_embedder_data), &preserved_data_reset_done);
-    StoreContextElement(native_context,
-                        Context::CONTINUATION_PRESERVED_EMBEDDER_DATA_INDEX,
-                        UndefinedConstant());
+    SetContinuationPreservedEmbedderData(UndefinedConstant());
     Goto(&preserved_data_reset_done);
     BIND(&preserved_data_reset_done);
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 
     RewindEnteredContext(saved_entered_context_count);
     SetCurrentContext(current_context);
@@ -288,16 +288,16 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
     const TNode<HeapObject> promise_or_capability = CAST(LoadObjectField(
         microtask, PromiseReactionJobTask::kPromiseOrCapabilityOffset));
 
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
     TNode<Object> preserved_embedder_data = LoadObjectField(
         microtask,
         PromiseReactionJobTask::kContinuationPreservedEmbedderDataOffset);
     Label preserved_data_done(this);
     GotoIf(IsUndefined(preserved_embedder_data), &preserved_data_done);
-    StoreContextElement(native_context,
-                        Context::CONTINUATION_PRESERVED_EMBEDDER_DATA_INDEX,
-                        preserved_embedder_data);
+    SetContinuationPreservedEmbedderData(preserved_embedder_data);
     Goto(&preserved_data_done);
     BIND(&preserved_data_done);
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 
     // Run the promise before/debug hook if enabled.
     RunAllPromiseHooks(PromiseHookType::kBefore, microtask_context,
@@ -313,13 +313,13 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
     RunAllPromiseHooks(PromiseHookType::kAfter, microtask_context,
                        promise_or_capability);
 
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
     Label preserved_data_reset_done(this);
     GotoIf(IsUndefined(preserved_embedder_data), &preserved_data_reset_done);
-    StoreContextElement(native_context,
-                        Context::CONTINUATION_PRESERVED_EMBEDDER_DATA_INDEX,
-                        UndefinedConstant());
+    SetContinuationPreservedEmbedderData(UndefinedConstant());
     Goto(&preserved_data_reset_done);
     BIND(&preserved_data_reset_done);
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 
     RewindEnteredContext(saved_entered_context_count);
     SetCurrentContext(current_context);
@@ -356,7 +356,7 @@ void MicrotaskQueueBuiltinsAssembler::IncrementFinishedMicrotaskCount(
 TNode<Context> MicrotaskQueueBuiltinsAssembler::GetCurrentContext() {
   auto ref = ExternalReference::Create(kContextAddress, isolate());
   // TODO(delphick): Add a checked cast. For now this is not possible as context
-  // can actually be Smi(0).
+  // can actually be Tagged<Smi>(0).
   return TNode<Context>::UncheckedCast(LoadFullTagged(ExternalConstant(ref)));
 }
 
@@ -377,7 +377,7 @@ TNode<IntPtrT> MicrotaskQueueBuiltinsAssembler::GetEnteredContextCount() {
   return Load<IntPtrT>(hsi, size_offset);
 }
 
-void MicrotaskQueueBuiltinsAssembler::EnterMicrotaskContext(
+void MicrotaskQueueBuiltinsAssembler::EnterContext(
     TNode<Context> native_context) {
   CSA_DCHECK(this, IsNativeContext(native_context));
 
@@ -409,29 +409,6 @@ void MicrotaskQueueBuiltinsAssembler::EnterMicrotaskContext(
     TNode<IntPtrT> new_size = IntPtrAdd(size, IntPtrConstant(1));
     StoreNoWriteBarrier(MachineType::PointerRepresentation(), hsi, size_offset,
                         new_size);
-
-    using FlagStack = DetachableVector<int8_t>;
-    TNode<IntPtrT> flag_data_offset =
-        IntPtrConstant(HandleScopeImplementer::kIsMicrotaskContextOffset +
-                       FlagStack::kDataOffset);
-    TNode<IntPtrT> flag_capacity_offset =
-        IntPtrConstant(HandleScopeImplementer::kIsMicrotaskContextOffset +
-                       FlagStack::kCapacityOffset);
-    TNode<IntPtrT> flag_size_offset =
-        IntPtrConstant(HandleScopeImplementer::kIsMicrotaskContextOffset +
-                       FlagStack::kSizeOffset);
-    // Ensure both stacks are in sync.
-    USE(flag_capacity_offset);
-    CSA_DCHECK(this,
-               WordEqual(capacity, Load<IntPtrT>(hsi, flag_capacity_offset)));
-    CSA_DCHECK(this, WordEqual(size, Load<IntPtrT>(hsi, flag_size_offset)));
-
-    TNode<RawPtrT> flag_data = Load<RawPtrT>(hsi, flag_data_offset);
-    StoreNoWriteBarrier(MachineRepresentation::kWord8, flag_data, size,
-                        BoolConstant(true));
-    StoreNoWriteBarrier(MachineType::PointerRepresentation(), hsi,
-                        flag_size_offset, new_size);
-
     Goto(&done);
   }
 
@@ -467,13 +444,6 @@ void MicrotaskQueueBuiltinsAssembler::RewindEnteredContext(
 
   StoreNoWriteBarrier(MachineType::PointerRepresentation(), hsi, size_offset,
                       saved_entered_context_count);
-
-  using FlagStack = DetachableVector<int8_t>;
-  StoreNoWriteBarrier(
-      MachineType::PointerRepresentation(), hsi,
-      IntPtrConstant(HandleScopeImplementer::kIsMicrotaskContextOffset +
-                     FlagStack::kSizeOffset),
-      saved_entered_context_count);
 }
 
 void MicrotaskQueueBuiltinsAssembler::RunAllPromiseHooks(

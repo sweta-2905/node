@@ -38,6 +38,7 @@ MemoryReducer::TimerTask::TimerTask(MemoryReducer* memory_reducer)
 void MemoryReducer::TimerTask::RunInternal() {
   Heap* heap = memory_reducer_->heap();
   const double time_ms = heap->MonotonicallyIncreasingTimeInMs();
+  heap->allocator()->new_space_allocator()->FreeLinearAllocationArea();
   heap->tracer()->SampleAllocation(base::TimeTicks::Now(),
                                    heap->NewSpaceAllocationCounter(),
                                    heap->OldGenerationAllocationCounter(),
@@ -60,7 +61,7 @@ void MemoryReducer::TimerTask::RunInternal() {
       false,
       low_allocation_rate || optimize_for_memory,
       heap->incremental_marking()->IsStopped() &&
-          (heap->incremental_marking()->CanBeStarted() || optimize_for_memory),
+          heap->incremental_marking()->CanBeStarted(),
   };
   memory_reducer_->NotifyTimer(event);
 }

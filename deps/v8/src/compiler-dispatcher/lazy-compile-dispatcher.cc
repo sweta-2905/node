@@ -183,7 +183,7 @@ void LazyCompileDispatcher::Enqueue(
 bool LazyCompileDispatcher::IsEnqueued(
     Handle<SharedFunctionInfo> function) const {
   Job* job = nullptr;
-  Tagged<Object> function_data = function->function_data(kAcquireLoad);
+  Tagged<Object> function_data = function->GetData();
   if (IsUncompiledDataWithPreparseDataAndJob(function_data)) {
     job = reinterpret_cast<Job*>(
         UncompiledDataWithPreparseDataAndJob::cast(function_data)->job());
@@ -210,7 +210,8 @@ void LazyCompileDispatcher::WaitForJobIfRunningOnBackground(
       // vector.
       pending_background_jobs_.erase(
           std::remove(pending_background_jobs_.begin(),
-                      pending_background_jobs_.end(), job));
+                      pending_background_jobs_.end(), job),
+          pending_background_jobs_.end());
       job->state = Job::State::kPendingToRunOnForeground;
       NotifyRemovedBackgroundJob(lock);
     } else {
@@ -222,7 +223,8 @@ void LazyCompileDispatcher::WaitForJobIfRunningOnBackground(
       // TODO(leszeks): Remove from finalizable jobs without walking the whole
       // vector.
       finalizable_jobs_.erase(
-          std::remove(finalizable_jobs_.begin(), finalizable_jobs_.end(), job));
+          std::remove(finalizable_jobs_.begin(), finalizable_jobs_.end(), job),
+          finalizable_jobs_.end());
       job->state = Job::State::kFinalizingNow;
     }
     return;
@@ -240,7 +242,8 @@ void LazyCompileDispatcher::WaitForJobIfRunningOnBackground(
   // TODO(leszeks): Remove from finalizable jobs without walking the whole
   // vector.
   finalizable_jobs_.erase(
-      std::remove(finalizable_jobs_.begin(), finalizable_jobs_.end(), job));
+      std::remove(finalizable_jobs_.begin(), finalizable_jobs_.end(), job),
+      finalizable_jobs_.end());
   job->state = Job::State::kFinalizingNow;
 }
 
@@ -316,7 +319,8 @@ void LazyCompileDispatcher::AbortJob(Handle<SharedFunctionInfo> shared_info) {
 
       pending_background_jobs_.erase(
           std::remove(pending_background_jobs_.begin(),
-                      pending_background_jobs_.end(), job));
+                      pending_background_jobs_.end(), job),
+          pending_background_jobs_.end());
       job->state = Job::State::kAbortingNow;
       NotifyRemovedBackgroundJob(lock);
     } else if (job->state == Job::State::kReadyToFinalize) {
@@ -325,7 +329,8 @@ void LazyCompileDispatcher::AbortJob(Handle<SharedFunctionInfo> shared_info) {
           1);
 
       finalizable_jobs_.erase(
-          std::remove(finalizable_jobs_.begin(), finalizable_jobs_.end(), job));
+          std::remove(finalizable_jobs_.begin(), finalizable_jobs_.end(), job),
+          finalizable_jobs_.end());
       job->state = Job::State::kAbortingNow;
     } else {
       UNREACHABLE();
@@ -369,7 +374,7 @@ void LazyCompileDispatcher::AbortAll() {
 
 LazyCompileDispatcher::Job* LazyCompileDispatcher::GetJobFor(
     Handle<SharedFunctionInfo> shared, const base::MutexGuard&) const {
-  Tagged<Object> function_data = shared->function_data(kAcquireLoad);
+  Tagged<Object> function_data = shared->GetData();
   if (IsUncompiledDataWithPreparseDataAndJob(function_data)) {
     return reinterpret_cast<Job*>(
         UncompiledDataWithPreparseDataAndJob::cast(function_data)->job());

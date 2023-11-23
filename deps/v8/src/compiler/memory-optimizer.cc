@@ -46,6 +46,8 @@ bool CanAllocate(const Node* node) {
     case IrOpcode::kStoreTrapOnNull:
     case IrOpcode::kRetain:
     case IrOpcode::kStackPointerGreaterThan:
+    case IrOpcode::kLoadStackPointer:
+    case IrOpcode::kSetStackPointer:
     case IrOpcode::kStaticAssert:
     // TODO(turbofan): Store nodes might do a bump-pointer allocation.
     //              We should introduce a special bump-pointer store node to
@@ -186,10 +188,11 @@ void WriteBarrierAssertFailed(Node* node, Node* object, const char* name,
 MemoryOptimizer::MemoryOptimizer(
     JSHeapBroker* broker, JSGraph* jsgraph, Zone* zone,
     MemoryLowering::AllocationFolding allocation_folding,
-    const char* function_debug_name, TickCounter* tick_counter)
+    const char* function_debug_name, TickCounter* tick_counter, bool is_wasm)
     : graph_assembler_(broker, jsgraph, zone, BranchSemantics::kMachine),
-      memory_lowering_(jsgraph, zone, &graph_assembler_, allocation_folding,
-                       WriteBarrierAssertFailed, function_debug_name),
+      memory_lowering_(jsgraph, zone, &graph_assembler_, is_wasm,
+                       allocation_folding, WriteBarrierAssertFailed,
+                       function_debug_name),
       wasm_address_reassociation_(jsgraph, zone),
       jsgraph_(jsgraph),
       empty_state_(AllocationState::Empty(zone)),
